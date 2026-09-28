@@ -1,0 +1,15 @@
+{
+  "description": "脱敏映射模板（可公开发布）：把本机绝对路径替换为通用占位，防止发布到 GitHub 时泄漏用户目录结构。用户名用 [^\\\\/] 通配，不硬编码任何具体用户名。用 [\\\\/] 兼容正/反斜杠混用。",
+  "local_override": "references/sensitive_paths.local.json",
+  "note": "你自己的私有路径（如额外磁盘下的自定义目录）请写进 sensitive_paths.local.json；该文件已被 .gitignore 排除，只会在本机生效，不会随仓库发布。脚本加载顺序：内置默认 → 本文件 → local.json。",
+  "replacements": [
+    {
+      "pattern": "C:[\\\\/]Users[\\\\/][^\\\\/]+[\\\\/]\\.workbuddy[\\\\/]skills",
+      "replacement": "~/.workbuddy/skills"
+    },
+    {
+      "pattern": "C:[\\\\/]Users[\\\\/][^\\\\/]+",
+      "replacement": "~"
+    }
+  ]
+}
