@@ -11,3 +11,7 @@
 ## v1.0.11（2026-09-30）
 
 token 从环境变量兜底 + GH_USER/GH_EMAIL 编排传参（--token-from-env）
+
+## v1.0.13（2026-09-30）
+
+修正发布编排：去掉 --no-release，推完自动建/更新 Release（此前编排声称建 Release 却没建，导致版本漂移）

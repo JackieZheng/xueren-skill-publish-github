@@ -7,7 +7,7 @@ slug: xueren-skill-publish-github
 displayName: 雪人老师·Skill发布到GitHub
 summary: 把本地任意 WorkBuddy skill 一键发布为 GitHub 开源仓库（不限 skill 名称与命名前缀）。
 description_en: One-click publish WorkBuddy skills to GitHub (auto-scrub + release).
-version: 1.0.12
+version: 1.0.14
 author: 雪人
 license: MIT
 allowed-tools: ""
