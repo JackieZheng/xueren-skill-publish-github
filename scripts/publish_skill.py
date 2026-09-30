@@ -442,14 +442,19 @@ def git_push(skill_dir, user, repo, token, ssh, retries, args_user, args_email):
     else:
         git("remote", "add", "origin", remote_url, cwd=skill_dir)
 
+    # 推送成功后立刻把 remote 里的 token 摘掉，避免 PAT 残留在 local git config（脱敏铁律）
+    safe_url = f"https://github.com/{user}/{repo}.git"
+
     last_err = ""
     for i in range(max(1, retries)):
         pr = git("push", "-u", "origin", "main", cwd=skill_dir, timeout=80)
         if pr.returncode == 0:
+            git("remote", "set-url", "origin", safe_url, cwd=skill_dir)
             return True, f"推送成功（第 {i + 1} 次尝试）"
         last_err = pr.stderr.strip()[-200:]
         if i < retries - 1:
             time.sleep(3)
+    git("remote", "set-url", "origin", safe_url, cwd=skill_dir)
     return False, f"推送失败：{last_err}"
 
 
@@ -474,16 +479,16 @@ def make_release(skill_dir, user, repo, version, token, tag_prefix, retries):
     tag = ver if ver.lower().startswith(tag_prefix) else f"{tag_prefix}{ver}"
     repo_url = f"https://github.com/{user}/{repo}"
 
-    # 1) 本地打标签（已存在则不覆盖，保留历史版本）
+    # 1) 本地打标签（已存在则保留历史版本，不覆盖；但仍继续走远端 Release 流程）
     listed = git("tag", "--list", cwd=skill_dir).stdout.split()
     if tag not in listed:
         r = git("tag", "-a", tag, "-m", f"{tag} release", cwd=skill_dir)
         if r.returncode != 0:
             return False, f"打标签失败：{(r.stderr or '').strip()[-200:]}"
     else:
-        return False, f"标签 {tag} 已存在，未覆盖（如需替换请先本地删除该 tag）"
+        print(f"    · 本地标签 {tag} 已存在，保留不覆盖，继续同步远端 Release")
 
-    # 2) 推送标签（GFW 抖动重试）
+    # 2) 推送标签（GFW 抖动重试；远端已存在同名 tag 也算成功）
     ok, msg = push_tag(skill_dir, tag, retries)
     if not ok:
         return False, msg

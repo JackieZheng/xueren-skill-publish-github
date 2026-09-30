@@ -3,9 +3,11 @@ id: xueren-skill-publish-github
 name: 雪人老师·Skill发布到GitHub
 title: 雪人老师·Skill发布到GitHub
 description: 把本地任意 WorkBuddy skill 一键发布为 GitHub 开源仓库（不限 skill 名称与命名前缀）。自动完成脱敏（本机绝对路径替换为通用占位）、给 SKILL.md 加 github 字段、生成 meta.json / LICENSE / .gitignore / 基础 README、通过 GitHub API 建仓库、git 提交并用 PAT 走 HTTPS 重试推送（应对 GFW 抖动）、推送后自动创建/更新 GitHub Release（v<version> 标签，幂等）。本地备份到 WB Skill 为可选步骤（需本机另装 xueren-skill-backup，默认不触发，不影响发布）。用户提到"把 skill 发到 github""开源发布 skill""publish skill to github""推送 skill 到 github""发布 skill 到 github"时触发。不适用于：需要 GitHub Pages 站点发布的场景（走各自流程）。
-description_zh: 雪人老师·Skill发布到GitHub
-description_en: xueren-skill-publish-github
-version: 1.0.6
+slug: xueren-skill-publish-github
+displayName: 雪人老师·Skill发布到GitHub
+summary: 把本地任意 WorkBuddy skill 一键发布为 GitHub 开源仓库（不限 skill 名称与命名前缀）。
+description_en: One-click publish WorkBuddy skills to GitHub (auto-scrub + release).
+version: 1.0.7
 author: 雪人
 license: MIT
 allowed-tools: ""
@@ -18,6 +20,8 @@ github: https://github.com/JackieZheng/xueren-skill-publish-github
 metadata:
   author: 雪人
   category: 工具
+description_zh: 把本地任意 WorkBuddy skill 一键发布为 GitHub 开源仓库（不限 skill 名称与命名前缀）。自动完成脱敏（本机绝对路径替换为通用占位）、给 SKILL.md 加 github 字段、生成 meta.json / LICENSE / .gitignore / 基础 README、通过 GitHub API 建仓库、git 提交并用 PAT 走 HTTPS 重试推送（应对 GFW 抖动）、推送后自动创建/更新 GitHub Release（v<version> 标签，幂等）。本地备份到 WB Skill 为可选步骤（需本机另装 xueren-skill-backup，默认不触发，不影响发布）。用户提到"把 skill 发到 github""开源发布 skill""publish skill to github""推送 skill 到 github""发布 skill 到 github"时触发。不适用于：需要 GitHub Pages 站点发布的场景（走各自流程）。
+
 ---
 
 # 雪人老师·Skill发布到GitHub
