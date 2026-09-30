@@ -474,19 +474,28 @@ def api_sync_main(skill_dir, user, repo, token, message, retries=3):
 
 
 def api_push_tag(user, repo, token, tag, sha, retries=3):
-    """用 API 直接创建/更新 tag ref（git push 走不通时的兜底）。"""
+    """用 API 直接创建/移动 tag ref（git push 走不通时的兜底）。
+
+    远端同名 tag 已存在且指向不可达对象时（历史被重写过），POST 会 422 —— 改为
+    「先删 ref 再建 ref」，这是 GitHub 上重挂 tag 唯一稳定的路径。
+    """
+    last = ""
     for _ in range(max(1, retries)):
         code, obj = gh_api(token, "POST", f"/repos/{user}/{repo}/git/refs",
                            {"ref": f"refs/tags/{tag}", "sha": sha, "force": True})
         if code in (200, 201, 204):
             return True, ""
-        if "Reference already exists" in str(obj)[:300]:
-            code2, _ = gh_api(token, "PATCH", f"/repos/{user}/{repo}/git/refs/tags/{tag}",
-                              {"sha": sha, "force": True})
-            if code2 in (200, 200, 204):
+        last = f"HTTP {code} {str(obj)[:120]}"
+        # 已存在 / 指向不可达对象 → 删掉再建
+        c1, _ = gh_api(token, "DELETE", f"/repos/{user}/{repo}/git/refs/tags/{tag}")
+        if c1 in (204, 200, 404, 422):
+            c2, obj2 = gh_api(token, "POST", f"/repos/{user}/{repo}/git/refs",
+                              {"ref": f"refs/tags/{tag}", "sha": sha, "force": True})
+            if c2 in (200, 201, 204):
                 return True, ""
+            last = f"重建失败 HTTP {c2} {str(obj2)[:120]}"
         time.sleep(2)
-    return False, f"API 创建 tag {tag} 失败：{str(obj)[:200]}"
+    return False, f"API 创建 tag {tag} 失败：{last}"
 
 
 def git_push(skill_dir, user, repo, token, ssh, retries, args_user, args_email):
@@ -809,17 +818,26 @@ def main():
     else:
         print("[12] 跳过 WB Skill 备份（开源版默认不依赖 xueren-skill-backup；如需本地存档可加 --backup）")
 
+    # 11.5) 兜底摘 PAT：无论走哪条推送路径，收尾都强制把 remote URL 还原成无凭据形式
+    token_left = False
+    cur = git("remote", "get-url", "origin", cwd=skill_dir)
+    if cur.returncode == 0 and "ghp_" in (cur.stdout or ""):
+        git("remote", "set-url", "origin", f"https://github.com/{args.user}/{repo}.git", cwd=skill_dir)
+        token_left = True
+
     print("\n✅ 发布完成：")
     print(f"   GitHub: {url}")
     if release_url:
         print(f"   Release: {release_url}")
     print(f"   本地目录: {skill_dir}")
     print("\n⚠️ 安全提醒：")
+    if token_left:
+        print("   - 远端推送过程中本脚本把 PAT 临时写进了 remote URL，收尾已自动摘除；")
+        print("     若看到历史残留：git -C \"<skill>\" remote set-url origin "
+              f"https://github.com/{args.user}/{repo}.git")
+        print("   - 长期方案：GitHub 网页注册本机 SSH 公钥后改用 --ssh。")
     if not args.ssh:
-        print("   - PAT 已嵌入本仓库 .git/config 的 remote URL，建议到 GitHub 吊销/轮换此 token。")
-        print("   - 推荐在 GitHub 网页注册本机 SSH 公钥（~/.ssh/id_rsa.pub）后改用：")
-        print(f"       git -C \"{skill_dir}\" remote set-url origin git@github.com:{args.user}/{repo}.git")
-    print("   - 推送走 HTTPS 且关闭了 sslVerify（GFW 代理环境需要），生产环境请评估风险。")
+        print("   - 推送走 HTTPS 且关闭了 sslVerify（GFW 代理环境需要），生产环境请评估风险。")
 
 
 if __name__ == "__main__":
