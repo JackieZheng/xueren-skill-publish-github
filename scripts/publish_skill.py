@@ -494,6 +494,16 @@ def api_push_tag(user, repo, token, tag, sha, retries=3):
             if c2 in (200, 201, 204):
                 return True, ""
             last = f"重建失败 HTTP {c2} {str(obj2)[:120]}"
+            # 传进去的 sha 在远端不存在（--api-only 下本地 HEAD 与 API 提交不同源）→ 改用远端 main 的 head
+            if "Object does not exist" in str(obj2):
+                g, o3 = gh_api(token, "GET", f"/repos/{user}/{repo}/refs/heads/main")
+                sha2 = (o3 or {}).get("object", {}).get("sha")
+                if not g and not sha2:
+                    sha2 = (o3 or {}).get("sha")
+                if sha2:
+                    sha = sha2
+                    last = ""
+                    continue
         time.sleep(2)
     return False, f"API 创建 tag {tag} 失败：{last}"
 
