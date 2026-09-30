@@ -418,17 +418,36 @@ def git(*args, cwd, timeout=75):
 FORCE = [False]
 # --api-only：完全绕开 git push，只走 GitHub API（沙箱里 git push 443 长期抖动时的终稿路径）
 API_ONLY = [False]
+# --reset-history：把远端历史重写成「一个 noreply 署名的根提交」（历史里已有真实邮箱时用它净化）
+RESET_HISTORY = [False]
 
 
 # git push 失败时的兜底：走 GitHub API 直接重写 main（沙箱 / GFW 下 443 抖动时常救场）
 API_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".pytest_cache", ".venv"}
 
 
-def api_sync_main(skill_dir, user, repo, token, message, retries=3):
+def noreply_identity(token, fallback_login=""):
+    """取 GitHub 账号的 noreply 邮箱：{id}+{login}@users.noreply.github.com。
+
+    开源零个人信息铁律：API 建的 commit 若不带 author/committer，GitHub 会用账号的
+    公开档案邮箱（真实邮箱）署名——必须显式指定 noreply。id/login 由 GET /user 取，
+    不硬编码。取不到就退回 fallback_login + 无邮箱（仅在明确无真实邮箱时）。
+    """
+    code, obj = gh_api(token, "GET", "/user")
+    if code == 200 and isinstance(obj, dict):
+        login = obj.get("login") or fallback_login
+        uid = obj.get("id")
+        if uid and login:
+            return login, f"{uid}+{login}@users.noreply.github.com"
+    return fallback_login, ""
+
+
+def api_sync_main(skill_dir, user, repo, token, message, retries=3, root=False, ident=None):
     """用 Contents/Data API 把工作区现有文件强制写进 main。返回 (head_sha or None, err)。
 
     流程：逐文件创建 blob → 构造 tree → commit → force 更新 refs/heads/main。
     命中已有 blob（sha 不变）时 GitHub 会直接复用，不会重复上传。
+    root=True 时不带 parent/base_tree，生成一个根提交（用于重写被污染的历史）。
     """
     entries, rel_paths = [], []
     for dirpath, dirnames, filenames in os.walk(skill_dir):
@@ -451,15 +470,23 @@ def api_sync_main(skill_dir, user, repo, token, message, retries=3):
     if not entries:
         return None, "工作区无文件可提交"
 
+    tree_payload = {"tree": entries}
+    if not root:
+        tree_payload["base_tree"] = "HEAD"
     tree_code, tree_obj = gh_api(
-        token, "POST", f"/repos/{user}/{repo}/git/trees",
-        {"tree": entries, "base_tree": "HEAD"})
+        token, "POST", f"/repos/{user}/{repo}/git/trees", tree_payload)
     if tree_code not in (200, 201):
         return None, f"创建 tree 失败：HTTP {tree_code} {str(tree_obj)[:200]}"
     base = tree_obj.get("sha")
 
+    commit_payload = {"message": message, "tree": base}
+    if root:
+        if not ident or not ident[1]:
+            return None, "root 提交必须提供 noreply 身份（ident）"
+        commit_payload["author"] = {"name": ident[0], "email": ident[1]}
+        commit_payload["committer"] = {"name": ident[0], "email": ident[1]}
     c_code, c_obj = gh_api(token, "POST", f"/repos/{user}/{repo}/git/commits",
-                           {"message": message, "tree": base})
+                           commit_payload)
     if c_code not in (200, 201):
         return None, f"创建 commit 失败：HTTP {c_code} {str(c_obj)[:200]}"
     sha = c_obj.get("sha")
@@ -541,10 +568,14 @@ def git_push(skill_dir, user, repo, token, ssh, retries, args_user, args_email):
     safe_url = f"https://github.com/{user}/{repo}.git"
 
     if API_ONLY[0]:
+        root = RESET_HISTORY[0]
         sha, err = api_sync_main(skill_dir, user, repo, token,
-                                 f"{os.path.basename(skill_dir)} 开源发布 · API 直推")
+                                 f"{os.path.basename(skill_dir)} 开源发布 · API 直推",
+                                 root=root,
+                                 ident=noreply_identity(token, fallback_login=user) if root else None)
         if sha:
-            return True, f"API 直推 main 成功（{sha[:12]}）"
+            git("update-ref", "refs/heads/main", sha, cwd=skill_dir)
+            return True, f"API 直推 main 成功（{sha[:12]}）" + ("，已重写为根提交" if root else "")
         return False, f"API 直推失败：{err}"
 
     force = ["--force"] if FORCE[0] else []
@@ -589,6 +620,12 @@ def make_release(skill_dir, user, repo, version, token, tag_prefix, retries):
     ver = str(version)
     tag = ver if ver.lower().startswith(tag_prefix) else f"{tag_prefix}{ver}"
     repo_url = f"https://github.com/{user}/{repo}"
+
+    # --reset-history：tag 被强制移动到新根提交后，旧 Release 会悬空 → 先删再建
+    if RESET_HISTORY[0]:
+        d_code, _ = gh_api(token, "DELETE",
+                           f"/repos/{user}/{repo}/releases/tags/{urllib.parse.quote(tag)}")
+        print(f"    · 已清理旧 Release（HTTP {d_code}），稍后重建 {tag}")
 
     # 1) 本地打标签（已存在则保留历史版本，不覆盖；但仍继续走远端 Release 流程）
     listed = git("tag", "--list", cwd=skill_dir).stdout.split()
@@ -697,6 +734,8 @@ def main():
     ap.add_argument("--bump-version", action="store_true", help="SKILL.md version 补丁号 +1")
     ap.add_argument("--force", action="store_true", help="强制推送（远端历史被重写导致 non-fast-forward 时用）")
     ap.add_argument("--api-only", action="store_true", help="跳过 git push，只用 GitHub API 写 main（443 长期抖动时用）")
+    ap.add_argument("--reset-history", action="store_true",
+                    help="配合 --api-only：把远端历史重写为一个 noreply 署名的根提交（历史里已有真实邮箱时用）")
     ap.add_argument("--skip-repo", action="store_true", help="跳过 API 建仓库（仓库已存在时）")
     args = ap.parse_args()
 
@@ -720,6 +759,7 @@ def main():
     reps = load_replacements()
     FORCE[0] = bool(args.force)
     API_ONLY[0] = bool(args.api_only)
+    RESET_HISTORY[0] = bool(args.reset_history)
 
     # 1) 版本号 +1
     skill_md = os.path.join(skill_dir, "SKILL.md")
