@@ -27,7 +27,7 @@ publish_skill.py — 把本地 WorkBuddy skill 发布为 GitHub 开源仓库（�
   - LICENSE 与 README 的署名取 SKILL.md 的 author 字段，模板内无硬编码人名。
 
 用法示例（--user 必须显式指定目标 GitHub 账号，脚本不设任何默认账号）：
-  python publish_skill.py --skill "C:/Users/<you>/.workbuddy/skills/my-skill" \
+  python publish_skill.py --skill "~/.workbuddy/skills/my-skill" \
          --user <your-github-user> --email <your-noreply-email> --token ghp_xxx --bump-version
   python publish_skill.py --skill my-skill --user <your-github-user> \
          --email <your-noreply-email> --token ghp_xxx --ssh --backup
@@ -720,6 +720,8 @@ def main():
     ap = argparse.ArgumentParser(description="把本地 WorkBuddy skill 发布为 GitHub 开源仓库（不限名称）")
     ap.add_argument("--skill", required=True, help="skill 目录（绝对路径或目录名）")
     ap.add_argument("--token", help="GitHub PAT（创建仓库 + HTTPS 推送必需；--ssh 时仍需用于建仓库）")
+    ap.add_argument("--token-from-env", action="store_true",
+                    help="即使 --token 为空也允许从 GH_TOKEN / GITHUB_TOKEN / GH_PAT 读取（供编排脚本调用）")
     ap.add_argument("--user", default="", help="目标 GitHub 用户名（仓库推送到谁的账号，必须显式指定，不读取任何默认账号）")
     ap.add_argument("--email", default=DEFAULT_EMAIL, help="git 提交邮箱（默认取 git config user.email；开源建议用 GitHub noreply 地址）")
     ap.add_argument("--desc", help="仓库描述（默认取 SKILL.md frontmatter description）")
@@ -760,6 +762,14 @@ def main():
     FORCE[0] = bool(args.force)
     API_ONLY[0] = bool(args.api_only)
     RESET_HISTORY[0] = bool(args.reset_history)
+
+    # token 兜底：--token 没给时允许从环境变量取（编排脚本只注入 GH_PAT，不传 --token）
+    if not args.token and args.token_from_env:
+        for ev in ("GH_TOKEN", "GITHUB_TOKEN", "GH_PAT"):
+            if os.environ.get(ev):
+                args.token = os.environ[ev].strip()
+                print(f"[0] 已从环境变量 {ev} 取到 token")
+                break
 
     # 1) 版本号 +1
     skill_md = os.path.join(skill_dir, "SKILL.md")
