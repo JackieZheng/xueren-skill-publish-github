@@ -37,6 +37,7 @@ import sys
 import re
 import json
 import time
+import base64
 import shutil
 import subprocess
 import datetime
@@ -413,6 +414,81 @@ def git(*args, cwd, timeout=75):
     )
 
 
+# --force：远端历史被重写过（non-fast-forward）时用强制推送
+FORCE = [False]
+# --api-only：完全绕开 git push，只走 GitHub API（沙箱里 git push 443 长期抖动时的终稿路径）
+API_ONLY = [False]
+
+
+# git push 失败时的兜底：走 GitHub API 直接重写 main（沙箱 / GFW 下 443 抖动时常救场）
+API_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".pytest_cache", ".venv"}
+
+
+def api_sync_main(skill_dir, user, repo, token, message, retries=3):
+    """用 Contents/Data API 把工作区现有文件强制写进 main。返回 (head_sha or None, err)。
+
+    流程：逐文件创建 blob → 构造 tree → commit → force 更新 refs/heads/main。
+    命中已有 blob（sha 不变）时 GitHub 会直接复用，不会重复上传。
+    """
+    entries, rel_paths = [], []
+    for dirpath, dirnames, filenames in os.walk(skill_dir):
+        dirnames[:] = [d for d in dirnames if d not in API_SKIP_DIRS]
+        for fn in filenames:
+            fp = os.path.join(dirpath, fn)
+            rel = os.path.relpath(fp, skill_dir).replace("\\", "/")
+            rel_paths.append(rel)
+            try:
+                with open(fp, "rb") as f:
+                    content = f.read()
+            except Exception as e:
+                return None, f"读取文件失败 {rel}: {e}"
+            code, obj = gh_api(token, "POST", f"/repos/{user}/{repo}/git/blobs",
+                               {"content": base64.b64encode(content).decode("ascii"),
+                                "encoding": "base64"})
+            if code not in (200, 201):
+                return None, f"上传 blob 失败 {rel}: HTTP {code} {str(obj)[:150]}"
+            entries.append({"path": rel, "mode": "100644", "type": "blob", "sha": obj.get("sha")})
+    if not entries:
+        return None, "工作区无文件可提交"
+
+    tree_code, tree_obj = gh_api(
+        token, "POST", f"/repos/{user}/{repo}/git/trees",
+        {"tree": entries, "base_tree": "HEAD"})
+    if tree_code not in (200, 201):
+        return None, f"创建 tree 失败：HTTP {tree_code} {str(tree_obj)[:200]}"
+    base = tree_obj.get("sha")
+
+    c_code, c_obj = gh_api(token, "POST", f"/repos/{user}/{repo}/git/commits",
+                           {"message": message, "tree": base})
+    if c_code not in (200, 201):
+        return None, f"创建 commit 失败：HTTP {c_code} {str(c_obj)[:200]}"
+    sha = c_obj.get("sha")
+    if not sha:
+        return None, f"commit 未返回 sha: {str(c_obj)[:200]}"
+
+    r_code, _ = gh_api(token, "PATCH", f"/repos/{user}/{repo}/git/refs/heads/main",
+                       {"sha": sha, "force": True})
+    if r_code not in (200, 201, 204):
+        return None, f"更新 main ref 失败：HTTP {r_code}"
+    return sha, ""
+
+
+def api_push_tag(user, repo, token, tag, sha, retries=3):
+    """用 API 直接创建/更新 tag ref（git push 走不通时的兜底）。"""
+    for _ in range(max(1, retries)):
+        code, obj = gh_api(token, "POST", f"/repos/{user}/{repo}/git/refs",
+                           {"ref": f"refs/tags/{tag}", "sha": sha, "force": True})
+        if code in (200, 201, 204):
+            return True, ""
+        if "Reference already exists" in str(obj)[:300]:
+            code2, _ = gh_api(token, "PATCH", f"/repos/{user}/{repo}/git/refs/tags/{tag}",
+                              {"sha": sha, "force": True})
+            if code2 in (200, 200, 204):
+                return True, ""
+        time.sleep(2)
+    return False, f"API 创建 tag {tag} 失败：{str(obj)[:200]}"
+
+
 def git_push(skill_dir, user, repo, token, ssh, retries, args_user, args_email):
     # init（若未初始化）
     if not os.path.isdir(os.path.join(skill_dir, ".git")):
@@ -445,17 +521,33 @@ def git_push(skill_dir, user, repo, token, ssh, retries, args_user, args_email):
     # 推送成功后立刻把 remote 里的 token 摘掉，避免 PAT 残留在 local git config（脱敏铁律）
     safe_url = f"https://github.com/{user}/{repo}.git"
 
+    if API_ONLY[0]:
+        sha, err = api_sync_main(skill_dir, user, repo, token,
+                                 f"{os.path.basename(skill_dir)} 开源发布 · API 直推")
+        if sha:
+            return True, f"API 直推 main 成功（{sha[:12]}）"
+        return False, f"API 直推失败：{err}"
+
+    force = ["--force"] if FORCE[0] else []
     last_err = ""
     for i in range(max(1, retries)):
-        pr = git("push", "-u", "origin", "main", cwd=skill_dir, timeout=80)
+        pr = git("push", *force, "-u", "origin", "main", cwd=skill_dir, timeout=80)
         if pr.returncode == 0:
             git("remote", "set-url", "origin", safe_url, cwd=skill_dir)
             return True, f"推送成功（第 {i + 1} 次尝试）"
         last_err = pr.stderr.strip()[-200:]
         if i < retries - 1:
             time.sleep(3)
+
+    # 兜底：git 走不通（GFW/443 抖动、non-fast-forward）时改用 GitHub API 强制重写 main
+    print(f"    · git push 失败（{last_err[:80]}），回退 GitHub API 强制推送 main")
+    sha, err = api_sync_main(skill_dir, user, repo, token,
+                             f"{os.path.basename(skill_dir)} 开源发布 · API 兜底")
+    if sha:
+        git("remote", "set-url", "origin", safe_url, cwd=skill_dir)
+        return True, f"API 兜底推送 main 成功（{sha[:12]}）"
     git("remote", "set-url", "origin", safe_url, cwd=skill_dir)
-    return False, f"推送失败：{last_err}"
+    return False, f"推送失败：{last_err} | API 兜底失败：{err}"
 
 
 def push_tag(skill_dir, tag, retries):
@@ -491,7 +583,17 @@ def make_release(skill_dir, user, repo, version, token, tag_prefix, retries):
     # 2) 推送标签（GFW 抖动重试；远端已存在同名 tag 也算成功）
     ok, msg = push_tag(skill_dir, tag, retries)
     if not ok:
-        return False, msg
+        # 兜底：用 main 的 head sha 通过 API 直接建/改 tag ref（git push 走不通时）
+        head = git("rev-parse", "HEAD", cwd=skill_dir).stdout.strip()
+        if head:
+            ok2, err2 = api_push_tag(user, repo, token, tag, head)
+            if ok2:
+                print(f"    · API 兜底创建 tag {tag} 成功")
+                msg = "API 兜底创建 tag"
+            else:
+                return False, f"{msg} | API 兜底失败：{err2}"
+        else:
+            return False, msg
 
     # 3) Release 正文
     head = git("rev-parse", "HEAD", cwd=skill_dir).stdout.strip()
@@ -574,6 +676,8 @@ def main():
     ap.add_argument("--backup", action="store_true", help="推送后尝试用本地 xueren-skill-backup 同步到 WB Skill 备份目录（可选；默认不依赖、不执行）")
     ap.add_argument("--push-retries", type=int, default=8, help="HTTPS 推送重试次数（默认 8）")
     ap.add_argument("--bump-version", action="store_true", help="SKILL.md version 补丁号 +1")
+    ap.add_argument("--force", action="store_true", help="强制推送（远端历史被重写导致 non-fast-forward 时用）")
+    ap.add_argument("--api-only", action="store_true", help="跳过 git push，只用 GitHub API 写 main（443 长期抖动时用）")
     ap.add_argument("--skip-repo", action="store_true", help="跳过 API 建仓库（仓库已存在时）")
     args = ap.parse_args()
 
@@ -595,6 +699,8 @@ def main():
     url = f"https://github.com/{args.user}/{repo}"
 
     reps = load_replacements()
+    FORCE[0] = bool(args.force)
+    API_ONLY[0] = bool(args.api_only)
 
     # 1) 版本号 +1
     skill_md = os.path.join(skill_dir, "SKILL.md")
