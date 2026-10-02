@@ -1,0 +1,36 @@
+# 依赖
+node_modules/
+
+# 用户凭据 —— 绝不进版本库
+.env
+*.env
+*.key
+*.pem
+*.p12
+private.key
+*creds*
+*secret*
+*token*
+*api_key*
+*apikey*
+
+# 本机私有的脱敏路径映射（含个人目录结构，仅本机使用）
+*.local.json
+
+# 运行临时产物
+log/
+*.tmp
+asr_out_*/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 开发日志 —— 不随仓库发布（用户约定）
+DEVLOG.md

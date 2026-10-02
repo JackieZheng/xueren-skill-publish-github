@@ -1,0 +1,17 @@
+{
+  "description": "本机私有脱敏映射（不入版本库，已被 .gitignore 排除）。放用户自己的目录结构，避免发布到 GitHub。",
+  "replacements": [
+    {
+      "pattern": "E:[\\\\/]高报指导[\\\\/]工作室[\\\\/]My Skills[\\\\/]WB Skill",
+      "replacement": "WB Skill 备份目录（用户侧本地技能库）"
+    },
+    {
+      "pattern": "E:[\\\\/]高报指导[\\\\/]工作室[\\\\/]My Skills",
+      "replacement": "用户侧本地技能库（WB Skill 根）"
+    },
+    {
+      "pattern": "E:[\\\\/]高报指导",
+      "replacement": "用户资料盘（E 盘）"
+    }
+  ]
+}
