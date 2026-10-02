@@ -20,14 +20,15 @@ publish_skill.py — 把本地 WorkBuddy skill 发布为 GitHub 开源仓库（�
 开源零个人信息（铁律）：
   本脚本不硬编码任何 GitHub 账号 / 邮箱 / 用户名 / 本地绝对路径。
   - --user 强制必填，缺失即报错退出，避免误推到不打算公开的账号。
-  - --email 建议显式传 GitHub noreply 地址（{numeric-id}+{login}@users.noreply.github.com）；
-    默认取本机 git config user.email，真实邮箱会随 commit 历史永久公开。
+  - 提交邮箱**默认**用 GitHub noreply 地址（{numeric-id}+{login}@users.noreply.github.com，
+    由 --token 查 /user 自动生成）；显式 --email 可覆盖，但传非 noreply 地址会打警告——
+    ⚠️ 旧版本默认取本机 `git config user.email`（全局真实邮箱），实测泄漏过一次（已修）。
   - 脱敏规则用户名用正则通配；通用规则与本机私有规则分离
     （references/sensitive_paths.json 公开 / sensitive_paths.local.json 由 .gitignore 排除）。
   - LICENSE 与 README 的署名取 SKILL.md 的 author 字段，模板内无硬编码人名。
 
 用法示例（--user 必须显式指定目标 GitHub 账号，脚本不设任何默认账号）：
-  python publish_skill.py --skill "C:/Users/<you>/.workbuddy/skills/my-skill" \
+  python publish_skill.py --skill "~/.workbuddy/skills/my-skill" \
          --user <your-github-user> --email <your-noreply-email> --token ghp_xxx --bump-version
   python publish_skill.py --skill my-skill --user <your-github-user> \
          --email <your-noreply-email> --token ghp_xxx --ssh --backup
@@ -37,6 +38,7 @@ import sys
 import re
 import json
 import time
+import base64
 import shutil
 import subprocess
 import datetime
@@ -61,9 +63,19 @@ def _git_config(name):
 
 # 本脚本**不设任何默认 GitHub 账号**：--user 强制必填，缺失即报错退出，
 # 避免别的用户误把仓库推到不打算公开的账号下。邮箱同理，来自调用方本机配置。
-DEFAULT_EMAIL = os.environ.get("GH_EMAIL") or _git_config("user.email")
+# ⚠️ 开源铁律（2026-10-02 踩坑，真实泄漏过）：**绝不要**把 `git config user.email`（本机全局）
+# 当默认提交邮箱——本机全局往往是真实邮箱（形如 someone@example.com），一旦被写进目标仓库的
+# 本地 config 并 commit，就会随 commit 永久公开在 GitHub 历史里（实测：git push 恰好成功时，
+# 污染直接进了远端 main）。默认只认显式来源：GH_EMAIL 环境变量 → 否则留空，
+# 由 main() 用 noreply_identity(--token) 生成 `{id}+{login}@users.noreply.github.com`。
+DEFAULT_EMAIL = os.environ.get("GH_EMAIL", "")
 DEFAULT_AUTHOR = "Author"
 DEFAULT_LICENSE = "MIT"
+
+# 按用户约定（2026-10-01）：**开发日志不随发布物外发**——GitHub 与 SkillHub 口径一致。
+# 做法：① 不进仓库：补进 .gitignore + `git rm --cached`（历史已提交过的也要清掉）；
+#       ② API 直推路径：跳过该文件，并显式下发 sha=None 的删除条目把远端旧文件删掉。
+NEVER_PUBLISH = {"DEVLOG.md"}
 BACKUP_SCRIPT = os.path.expanduser(r"~/.workbuddy/skills/xueren-skill-backup/scripts/sync_backups.py")
 
 # 脱敏默认值（references/sensitive_paths.json 优先加载；二者合并去重）。
@@ -284,6 +296,9 @@ def gen_gitignore(skill_dir):
         "*.tmp\n"
         "asr_out_*/\n"
         "\n"
+        "# 开发日志 —— 不随仓库发布（用户约定）\n"
+        "DEVLOG.md\n"
+        "\n"
         "# Python\n"
         "__pycache__/\n"
         "*.pyc\n"
@@ -297,6 +312,31 @@ def gen_gitignore(skill_dir):
     with open(os.path.join(skill_dir, ".gitignore"), "w", encoding="utf-8") as f:
         f.write(body)
     return os.path.join(skill_dir, ".gitignore")
+
+
+def ensure_never_publish_ignored(skill_dir):
+    """把 NEVER_PUBLISH 里的文件名补进 .gitignore。
+
+    为什么需要单独一步：`gen_gitignore` 只在 .gitignore **缺失**时才生成，
+    已存在的老仓库会被整段跳过 → 老仓库永远拿不到「DEVLOG.md 不外发」这条规则。
+    """
+    gp = os.path.join(skill_dir, ".gitignore")
+    try:
+        with open(gp, "r", encoding="utf-8") as f:
+            body = f.read()
+    except Exception:
+        body = ""
+    lines = {ln.strip() for ln in body.splitlines()}
+    missing = [n for n in sorted(NEVER_PUBLISH) if n not in lines]
+    if not missing:
+        return 0
+    add = ""
+    if body and not body.endswith("\n"):
+        add += "\n"
+    add += "\n# 开发日志 —— 不随仓库发布（用户约定）\n" + "".join(n + "\n" for n in missing)
+    with open(gp, "a", encoding="utf-8") as f:
+        f.write(add)
+    return len(missing)
 
 
 def gen_readme(skill_dir, fm, url, tree):
@@ -406,11 +446,172 @@ def gh_api(token, method, path, payload=None):
 
 
 def git(*args, cwd, timeout=75):
-    return subprocess.run(
-        ["git", "-c", "http.sslVerify=false", *args],
-        cwd=cwd, timeout=timeout,
-        capture_output=True, text=True,
-    )
+    try:
+        return subprocess.run(
+            ["git", "-c", "http.sslVerify=false", *args],
+            cwd=cwd, timeout=timeout,
+            capture_output=True, text=True,
+        )
+    except subprocess.TimeoutExpired:
+        # ⚠️ 2026-10-02 踩坑（真实炸过）：GFW 下 `git push origin v<ver>` 会超时，
+        # 抛出的 TimeoutExpired **此前没有任何 try 接住** → 整个发布脚本 traceback 退出，
+        # 现象是「main 已推成功，但 tag 与 Release 都没建，脚本还报一大段栈」。
+        # 这里统一把超时转成"失败的普通结果"（returncode=124），交给上层重试 /
+        # 走 API 兜底（api_push_tag），绝不让它炸掉整个流程。
+        return subprocess.CompletedProcess(
+            ["git", *[str(a) for a in args]], 124, "",
+            "timeout after %ss: git %s" % (timeout, " ".join(str(a) for a in args[:2])),
+        )
+
+
+# --force：远端历史被重写过（non-fast-forward）时用强制推送
+FORCE = [False]
+# --api-only：完全绕开 git push，只走 GitHub API（沙箱里 git push 443 长期抖动时的终稿路径）
+API_ONLY = [False]
+# --reset-history：把远端历史重写成「一个 noreply 署名的根提交」（历史里已有真实邮箱时用它净化）
+RESET_HISTORY = [False]
+
+
+# git push 失败时的兜底：走 GitHub API 直接重写 main（沙箱 / GFW 下 443 抖动时常救场）
+API_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".pytest_cache", ".venv"}
+
+
+def noreply_identity(token, fallback_login=""):
+    """取 GitHub 账号的 noreply 邮箱：{id}+{login}@users.noreply.github.com。
+
+    开源零个人信息铁律：API 建的 commit 若不带 author/committer，GitHub 会用账号的
+    公开档案邮箱（真实邮箱）署名——必须显式指定 noreply。id/login 由 GET /user 取，
+    不硬编码。取不到就退回 fallback_login + 无邮箱（仅在明确无真实邮箱时）。
+    """
+    code, obj = gh_api(token, "GET", "/user")
+    if code == 200 and isinstance(obj, dict):
+        login = obj.get("login") or fallback_login
+        uid = obj.get("id")
+        if uid and login:
+            return login, f"{uid}+{login}@users.noreply.github.com"
+    return fallback_login, ""
+
+
+def api_sync_main(skill_dir, user, repo, token, message, retries=3, root=False, ident=None):
+    """用 Contents/Data API 把工作区现有文件强制写进 main。返回 (head_sha or None, err)。
+
+    流程：逐文件创建 blob → 构造 tree → commit → force 更新 refs/heads/main。
+    命中已有 blob（sha 不变）时 GitHub 会直接复用，不会重复上传。
+    root=True 时不带 parent/base_tree，生成一个根提交（用于重写被污染的历史）。
+    """
+    entries, rel_paths = [], []
+    for dirpath, dirnames, filenames in os.walk(skill_dir):
+        dirnames[:] = [d for d in dirnames if d not in API_SKIP_DIRS]
+        for fn in filenames:
+            if fn in NEVER_PUBLISH:                 # 开发日志等：不进远端
+                continue
+            fp = os.path.join(dirpath, fn)
+            rel = os.path.relpath(fp, skill_dir).replace("\\", "/")
+            rel_paths.append(rel)
+            try:
+                with open(fp, "rb") as f:
+                    content = f.read()
+            except Exception as e:
+                return None, f"读取文件失败 {rel}: {e}"
+            code, obj = gh_api(token, "POST", f"/repos/{user}/{repo}/git/blobs",
+                               {"content": base64.b64encode(content).decode("ascii"),
+                                "encoding": "base64"})
+            if code not in (200, 201):
+                return None, f"上传 blob 失败 {rel}: HTTP {code} {str(obj)[:150]}"
+            entries.append({"path": rel, "mode": "100644", "type": "blob", "sha": obj.get("sha")})
+    if not entries:
+        return None, "工作区无文件可提交"
+
+    # 远端已存在、但已列入「不外发」的文件 → 下发 sha=None 的删除条目，顺手清掉
+    # （base_tree 会保留未提及的旧条目，不提就永远删不掉）
+    if not root:
+        for _name in sorted(NEVER_PUBLISH):
+            _code, _ = gh_api(token, "GET", f"/repos/{user}/{repo}/contents/{_name}")
+            if _code == 200:
+                entries.append({"path": _name, "mode": "100644", "type": "blob", "sha": None})
+                rel_paths.append(_name + "（删除）")
+
+    tree_payload = {"tree": entries}
+    if not root:
+        tree_payload["base_tree"] = "HEAD"
+    tree_code, tree_obj = gh_api(
+        token, "POST", f"/repos/{user}/{repo}/git/trees", tree_payload)
+    if tree_code not in (200, 201):
+        return None, f"创建 tree 失败：HTTP {tree_code} {str(tree_obj)[:200]}"
+    base = tree_obj.get("sha")
+
+    commit_payload = {"message": message, "tree": base}
+    # 开源零个人信息铁律：无论根提交还是子提交，都显式写明 noreply 身份。
+    # 不写的话 GitHub 会用账号档案里的真实邮箱署名，且会永久留在公开历史里。
+    if root and (not ident or not ident[1]):
+        return None, "root 提交必须提供 noreply 身份（ident）"
+    if ident and ident[1]:
+        commit_payload["author"] = {"name": ident[0], "email": ident[1]}
+        commit_payload["committer"] = {"name": ident[0], "email": ident[1]}
+    c_code, c_obj = gh_api(token, "POST", f"/repos/{user}/{repo}/git/commits",
+                           commit_payload)
+    if c_code not in (200, 201):
+        return None, f"创建 commit 失败：HTTP {c_code} {str(c_obj)[:200]}"
+    sha = c_obj.get("sha")
+    if not sha:
+        return None, f"commit 未返回 sha: {str(c_obj)[:200]}"
+
+    r_code, _ = gh_api(token, "PATCH", f"/repos/{user}/{repo}/git/refs/heads/main",
+                       {"sha": sha, "force": True})
+    if r_code not in (200, 201, 204):
+        return None, f"更新 main ref 失败：HTTP {r_code}"
+    return sha, ""
+
+
+def remote_main_sha(user, repo, token):
+    """取远端 main 的 head sha（拿不到返回 ""）。两种端点形状都试一遍。"""
+    for path in (f"/repos/{user}/{repo}/git/ref/heads/main",
+                 f"/repos/{user}/{repo}/commits/main"):
+        _code, obj = gh_api(token, "GET", path)
+        if isinstance(obj, dict):
+            sha = ((obj.get("object") or {}).get("sha") or obj.get("sha") or "")
+            if sha:
+                return sha
+    return ""
+
+
+def api_push_tag(user, repo, token, tag, sha, retries=3):
+    """用 API 直接创建/移动 tag ref（git push 走不通时的兜底）。
+
+    远端同名 tag 已存在且指向不可达对象时（历史被重写过），POST 会 422 —— 改为
+    「先删 ref 再建 ref」，这是 GitHub 上重挂 tag 唯一稳定的路径。
+    """
+    last = ""
+    for _ in range(max(1, retries)):
+        code, obj = gh_api(token, "POST", f"/repos/{user}/{repo}/git/refs",
+                           {"ref": f"refs/tags/{tag}", "sha": sha, "force": True})
+        if code in (200, 201, 204):
+            return True, ""
+        last = f"HTTP {code} {str(obj)[:120]}"
+        # 已存在 / 指向不可达对象 → 删掉再建
+        c1, _ = gh_api(token, "DELETE", f"/repos/{user}/{repo}/git/refs/tags/{tag}")
+        if c1 in (204, 200, 404, 422):
+            c2, obj2 = gh_api(token, "POST", f"/repos/{user}/{repo}/git/refs",
+                              {"ref": f"refs/tags/{tag}", "sha": sha, "force": True})
+            if c2 in (200, 201, 204):
+                return True, ""
+            last = f"重建失败 HTTP {c2} {str(obj2)[:120]}"
+            # 传进去的 sha 在远端不存在（本地 HEAD 与 API 提交不同源）→ 改用远端 main 的 head
+            if "Object does not exist" in str(obj2):
+                sha2 = ""
+                for path in (f"/repos/{user}/{repo}/git/ref/heads/main",
+                             f"/repos/{user}/{repo}/commits/main"):
+                    _c, _o = gh_api(token, "GET", path)
+                    if isinstance(_o, dict):
+                        sha2 = ((_o.get("object") or {}).get("sha") or _o.get("sha") or "")
+                        if sha2:
+                            break
+                if sha2 and sha2 != sha:
+                    sha = sha2
+                    last = ""
+                    continue
+        time.sleep(2)
+    return False, f"API 创建 tag {tag} 失败：{last}"
 
 
 def git_push(skill_dir, user, repo, token, ssh, retries, args_user, args_email):
@@ -420,6 +621,11 @@ def git_push(skill_dir, user, repo, token, ssh, retries, args_user, args_email):
     git("config", "user.name", args_user, cwd=skill_dir)
     git("config", "user.email", args_email, cwd=skill_dir)
     git("config", "http.sslVerify", "false", cwd=skill_dir)
+
+    # 不外发文件（DEVLOG.md 等）：补 .gitignore + 从索引摘掉（历史提交过的也要清）
+    ensure_never_publish_ignored(skill_dir)
+    for _name in sorted(NEVER_PUBLISH):
+        git("rm", "--cached", "-f", "--ignore-unmatch", _name, cwd=skill_dir)
 
     git("add", "-A", cwd=skill_dir)
     # commit（无改动也 OK）
@@ -442,15 +648,45 @@ def git_push(skill_dir, user, repo, token, ssh, retries, args_user, args_email):
     else:
         git("remote", "add", "origin", remote_url, cwd=skill_dir)
 
+    # 推送成功后立刻把 remote 里的 token 摘掉，避免 PAT 残留在 local git config（脱敏铁律）
+    safe_url = f"https://github.com/{user}/{repo}.git"
+
+    if API_ONLY[0]:
+        root = RESET_HISTORY[0]
+        ident = noreply_identity(token, fallback_login=user)
+        sha, err = api_sync_main(skill_dir, user, repo, token,
+                                 f"{os.path.basename(skill_dir)} 开源发布 · API 直推",
+                                 root=root, ident=ident)
+        if sha:
+            git("update-ref", "refs/heads/main", sha, cwd=skill_dir)
+            return True, f"API 直推 main 成功（{sha[:12]}）" + ("，已重写为根提交" if root else "")
+        return False, f"API 直推失败：{err}"
+
+    force = ["--force"] if FORCE[0] else []
     last_err = ""
     for i in range(max(1, retries)):
-        pr = git("push", "-u", "origin", "main", cwd=skill_dir, timeout=80)
+        pr = git("push", *force, "-u", "origin", "main", cwd=skill_dir, timeout=80)
         if pr.returncode == 0:
+            git("remote", "set-url", "origin", safe_url, cwd=skill_dir)
             return True, f"推送成功（第 {i + 1} 次尝试）"
         last_err = pr.stderr.strip()[-200:]
         if i < retries - 1:
             time.sleep(3)
-    return False, f"推送失败：{last_err}"
+
+    # 兜底：git 走不通（GFW/443 抖动、non-fast-forward）时改用 GitHub API 强制重写 main
+    print(f"    · git push 失败（{last_err[:80]}），回退 GitHub API 强制推送 main")
+    sha, err = api_sync_main(skill_dir, user, repo, token,
+                             f"{os.path.basename(skill_dir)} 开源发布 · API 兜底",
+                             ident=noreply_identity(token, fallback_login=user))
+    if sha:
+        git("remote", "set-url", "origin", safe_url, cwd=skill_dir)
+        # 尽量把本地 main 指到 API 新建的 sha。该 commit 通常不在本地（fetch 同样被 GFW 挡着），
+        # 所以先探测对象是否存在；对不上也无妨——make_release 会**优先用远端 main 的 head**。
+        if git("cat-file", "-e", sha + "^{commit}", cwd=skill_dir).returncode == 0:
+            git("update-ref", "refs/heads/main", sha, cwd=skill_dir)
+        return True, f"API 兜底推送 main 成功（{sha[:12]}）"
+    git("remote", "set-url", "origin", safe_url, cwd=skill_dir)
+    return False, f"推送失败：{last_err} | API 兜底失败：{err}"
 
 
 def push_tag(skill_dir, tag, retries):
@@ -474,22 +710,51 @@ def make_release(skill_dir, user, repo, version, token, tag_prefix, retries):
     tag = ver if ver.lower().startswith(tag_prefix) else f"{tag_prefix}{ver}"
     repo_url = f"https://github.com/{user}/{repo}"
 
-    # 1) 本地打标签（已存在则不覆盖，保留历史版本）
-    listed = git("tag", "--list", cwd=skill_dir).stdout.split()
-    if tag not in listed:
-        r = git("tag", "-a", tag, "-m", f"{tag} release", cwd=skill_dir)
-        if r.returncode != 0:
-            return False, f"打标签失败：{(r.stderr or '').strip()[-200:]}"
+    # --reset-history：tag 被强制移动到新根提交后，旧 Release 会悬空 → 先删再建
+    if RESET_HISTORY[0]:
+        d_code, _ = gh_api(token, "DELETE",
+                           f"/repos/{user}/{repo}/releases/tags/{urllib.parse.quote(tag)}")
+        print(f"    · 已清理旧 Release（HTTP {d_code}），稍后重建 {tag}")
+
+    # 0) 决定 tag 要指向哪个 commit —— **优先用远端 main 的 head**。
+    #    ⚠️ 2026-10-01 实测踩坑：git push 失败走 API 兜底推 main 后，本地 refs/heads/main
+    #       与远端不同源（本地没法 fetch 到 API 新建的那个 commit）。此时若还拿
+    #       `git rev-parse HEAD` 去建 tag，GitHub 会 422「Object does not exist」，
+    #       表现就是「main 推成功、Release 却挂了」。
+    local_head = git("rev-parse", "HEAD", cwd=skill_dir).stdout.strip()
+    remote_head = remote_main_sha(user, repo, token)
+    divergent = bool(remote_head and local_head and remote_head != local_head)
+    head = remote_head or local_head
+
+    # 1) 本地打标签（已存在则保留历史版本，不覆盖；但仍继续走远端 Release 流程）。
+    #    本地与远端不同源时**跳过本地打标签**——否则 push 会把这个分叉提交一起推上去。
+    if divergent:
+        print(f"    · 本地 HEAD({local_head[:8]}) 与远端 main({remote_head[:8]}) 不同源，"
+              f"跳过本地打标签，改由 API 创建")
     else:
-        return False, f"标签 {tag} 已存在，未覆盖（如需替换请先本地删除该 tag）"
+        listed = git("tag", "--list", cwd=skill_dir).stdout.split()
+        if tag not in listed:
+            r = git("tag", "-a", tag, "-m", f"{tag} release", cwd=skill_dir)
+            if r.returncode != 0:
+                return False, f"打标签失败：{(r.stderr or '').strip()[-200:]}"
+        else:
+            print(f"    · 本地标签 {tag} 已存在，保留不覆盖，继续同步远端 Release")
 
-    # 2) 推送标签（GFW 抖动重试）
-    ok, msg = push_tag(skill_dir, tag, retries)
+    # 2) 推送标签（GFW 抖动重试；远端已存在同名 tag 也算成功）
+    ok, msg = (False, "本地与远端不同源，改走 API") if divergent else push_tag(skill_dir, tag, retries)
     if not ok:
-        return False, msg
+        # 兜底：用 main 的 head sha 通过 API 直接建/改 tag ref（git push 走不通时）
+        if head:
+            ok2, err2 = api_push_tag(user, repo, token, tag, head)
+            if ok2:
+                print(f"    · API 兜底创建 tag {tag} 成功")
+                msg = "API 兜底创建 tag"
+            else:
+                return False, f"{msg} | API 兜底失败：{err2}"
+        else:
+            return False, msg
 
-    # 3) Release 正文
-    head = git("rev-parse", "HEAD", cwd=skill_dir).stdout.strip()
+    # 3) Release 正文（head 已在上面按「远端优先」算好）
     recent = git("log", "--oneline", "-n", "5", cwd=skill_dir).stdout.strip()
     today = datetime.date.today().isoformat()
     body = (
@@ -557,6 +822,8 @@ def main():
     ap = argparse.ArgumentParser(description="把本地 WorkBuddy skill 发布为 GitHub 开源仓库（不限名称）")
     ap.add_argument("--skill", required=True, help="skill 目录（绝对路径或目录名）")
     ap.add_argument("--token", help="GitHub PAT（创建仓库 + HTTPS 推送必需；--ssh 时仍需用于建仓库）")
+    ap.add_argument("--token-from-env", action="store_true",
+                    help="即使 --token 为空也允许从 GH_TOKEN / GITHUB_TOKEN / GH_PAT 读取（供编排脚本调用）")
     ap.add_argument("--user", default="", help="目标 GitHub 用户名（仓库推送到谁的账号，必须显式指定，不读取任何默认账号）")
     ap.add_argument("--email", default=DEFAULT_EMAIL, help="git 提交邮箱（默认取 git config user.email；开源建议用 GitHub noreply 地址）")
     ap.add_argument("--desc", help="仓库描述（默认取 SKILL.md frontmatter description）")
@@ -569,6 +836,10 @@ def main():
     ap.add_argument("--backup", action="store_true", help="推送后尝试用本地 xueren-skill-backup 同步到 WB Skill 备份目录（可选；默认不依赖、不执行）")
     ap.add_argument("--push-retries", type=int, default=8, help="HTTPS 推送重试次数（默认 8）")
     ap.add_argument("--bump-version", action="store_true", help="SKILL.md version 补丁号 +1")
+    ap.add_argument("--force", action="store_true", help="强制推送（远端历史被重写导致 non-fast-forward 时用）")
+    ap.add_argument("--api-only", action="store_true", help="跳过 git push，只用 GitHub API 写 main（443 长期抖动时用）")
+    ap.add_argument("--reset-history", action="store_true",
+                    help="配合 --api-only：把远端历史重写为一个 noreply 署名的根提交（历史里已有真实邮箱时用）")
     ap.add_argument("--skip-repo", action="store_true", help="跳过 API 建仓库（仓库已存在时）")
     args = ap.parse_args()
 
@@ -590,6 +861,32 @@ def main():
     url = f"https://github.com/{args.user}/{repo}"
 
     reps = load_replacements()
+    FORCE[0] = bool(args.force)
+    API_ONLY[0] = bool(args.api_only)
+    RESET_HISTORY[0] = bool(args.reset_history)
+
+    # token 兜底：--token 没给时允许从环境变量取（编排脚本只注入 GH_PAT，不传 --token）
+    if not args.token and args.token_from_env:
+        for ev in ("GH_TOKEN", "GITHUB_TOKEN", "GH_PAT"):
+            if os.environ.get(ev):
+                args.token = os.environ[ev].strip()
+                print(f"[0] 已从环境变量 {ev} 取到 token")
+                break
+
+    # 0.5) 提交身份（开源零个人信息铁律）：显式 --email > GH_EMAIL > noreply({id}+{login})
+    #      —— 绝不回退到本机 git config 的真实邮箱（见 DEFAULT_EMAIL 处的踩坑说明）。
+    submit_login, noreply = noreply_identity(args.token, fallback_login=args.user)
+    submit_email = (args.email or "").strip() or noreply
+    if not submit_email:
+        print("[warn] 无法确定提交邮箱（未给 --email/GH_EMAIL，且 noreply 查询失败）——"
+              "提交身份将为空；建议显式传 --email <id>+<login>@users.noreply.github.com")
+    elif "users.noreply.github.com" not in submit_email:
+        print(f"[warn] ⚠️ 提交邮箱 {submit_email} **不是** GitHub noreply 地址——"
+              "开源仓库会把它永久公开在 commit 历史里（违反零个人信息铁律），"
+              "建议改用 --email <id>+<login>@users.noreply.github.com")
+    else:
+        print(f"[0.5] 提交身份：{submit_login or args.user} <{submit_email}>")
+    args.email = submit_email
 
     # 1) 版本号 +1
     skill_md = os.path.join(skill_dir, "SKILL.md")
@@ -667,7 +964,7 @@ def main():
         print("[error] HTTPS 推送需要 --token（或用 --ssh 走已注册公钥）")
         sys.exit(1)
     ok, msg = git_push(skill_dir, args.user, repo, args.token or "", args.ssh, args.push_retries,
-                       _git_config("user.name") or args.user, args.email or _git_config("user.email"))
+                       submit_login or args.user, submit_email)
     print(f"[9] 推送：{msg}")
     if not ok:
         print("[error] 推送失败，详见上方错误")
@@ -698,17 +995,26 @@ def main():
     else:
         print("[12] 跳过 WB Skill 备份（开源版默认不依赖 xueren-skill-backup；如需本地存档可加 --backup）")
 
+    # 11.5) 兜底摘 PAT：无论走哪条推送路径，收尾都强制把 remote URL 还原成无凭据形式
+    token_left = False
+    cur = git("remote", "get-url", "origin", cwd=skill_dir)
+    if cur.returncode == 0 and "ghp_" in (cur.stdout or ""):
+        git("remote", "set-url", "origin", f"https://github.com/{args.user}/{repo}.git", cwd=skill_dir)
+        token_left = True
+
     print("\n✅ 发布完成：")
     print(f"   GitHub: {url}")
     if release_url:
         print(f"   Release: {release_url}")
     print(f"   本地目录: {skill_dir}")
     print("\n⚠️ 安全提醒：")
+    if token_left:
+        print("   - 远端推送过程中本脚本把 PAT 临时写进了 remote URL，收尾已自动摘除；")
+        print("     若看到历史残留：git -C \"<skill>\" remote set-url origin "
+              f"https://github.com/{args.user}/{repo}.git")
+        print("   - 长期方案：GitHub 网页注册本机 SSH 公钥后改用 --ssh。")
     if not args.ssh:
-        print("   - PAT 已嵌入本仓库 .git/config 的 remote URL，建议到 GitHub 吊销/轮换此 token。")
-        print("   - 推荐在 GitHub 网页注册本机 SSH 公钥（~/.ssh/id_rsa.pub）后改用：")
-        print(f"       git -C \"{skill_dir}\" remote set-url origin git@github.com:{args.user}/{repo}.git")
-    print("   - 推送走 HTTPS 且关闭了 sslVerify（GFW 代理环境需要），生产环境请评估风险。")
+        print("   - 推送走 HTTPS 且关闭了 sslVerify（GFW 代理环境需要），生产环境请评估风险。")
 
 
 if __name__ == "__main__":

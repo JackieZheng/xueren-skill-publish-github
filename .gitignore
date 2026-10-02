@@ -31,3 +31,6 @@ __pycache__/
 # 系统
 .DS_Store
 Thumbs.db
+
+# 开发日志 —— 不随仓库发布（用户约定）
+DEVLOG.md

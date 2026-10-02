@@ -3,9 +3,11 @@ id: xueren-skill-publish-github
 name: 雪人老师·Skill发布到GitHub
 title: 雪人老师·Skill发布到GitHub
 description: 把本地任意 WorkBuddy skill 一键发布为 GitHub 开源仓库（不限 skill 名称与命名前缀）。自动完成脱敏（本机绝对路径替换为通用占位）、给 SKILL.md 加 github 字段、生成 meta.json / LICENSE / .gitignore / 基础 README、通过 GitHub API 建仓库、git 提交并用 PAT 走 HTTPS 重试推送（应对 GFW 抖动）、推送后自动创建/更新 GitHub Release（v<version> 标签，幂等）。本地备份到 WB Skill 为可选步骤（需本机另装 xueren-skill-backup，默认不触发，不影响发布）。用户提到"把 skill 发到 github""开源发布 skill""publish skill to github""推送 skill 到 github""发布 skill 到 github"时触发。不适用于：需要 GitHub Pages 站点发布的场景（走各自流程）。
-description_zh: 雪人老师·Skill发布到GitHub
-description_en: xueren-skill-publish-github
-version: 1.0.6
+slug: xueren-skill-publish-github
+displayName: 雪人老师·Skill发布到GitHub
+summary: 把本地任意 WorkBuddy skill 一键发布为 GitHub 开源仓库（不限 skill 名称与命名前缀）。
+description_en: One-click publish WorkBuddy skills to GitHub (auto-scrub + release).
+version: 1.0.17
 author: 雪人
 license: MIT
 allowed-tools: ""
@@ -18,6 +20,8 @@ github: https://github.com/JackieZheng/xueren-skill-publish-github
 metadata:
   author: 雪人
   category: 工具
+description_zh: 把本地任意 WorkBuddy skill 一键发布为 GitHub 开源仓库（不限 skill 名称与命名前缀）。自动完成脱敏（本机绝对路径替换为通用占位）、给 SKILL.md 加 github 字段、生成 meta.json / LICENSE / .gitignore / 基础 README、通过 GitHub API 建仓库、git 提交并用 PAT 走 HTTPS 重试推送（应对 GFW 抖动）、推送后自动创建/更新 GitHub Release（v<version> 标签，幂等）。本地备份到 WB Skill 为可选步骤（需本机另装 xueren-skill-backup，默认不触发，不影响发布）。用户提到"把 skill 发到 github""开源发布 skill""publish skill to github""推送 skill 到 github""发布 skill 到 github"时触发。不适用于：需要 GitHub Pages 站点发布的场景（走各自流程）。
+
 ---
 
 # 雪人老师·Skill发布到GitHub
@@ -67,8 +71,9 @@ python "~/.workbuddy/skills/xueren-skill-publish-github/scripts/publish_skill.py
 ```
 
 > **`--user` 必填**：脚本不设任何默认 GitHub 账号，不填会直接报错退出——这是刻意设计，避免别人误把仓库
-> 推到自己不打算公开的账号下。**`--email` 建议显式传 GitHub noreply 地址**
-> （`{numeric-id}+{login}@users.noreply.github.com`），否则取本机 git config 的真实邮箱，会随 commit 历史公开。
+> 推到自己不打算公开的账号下。**提交邮箱默认就是 GitHub noreply 地址**
+> （`{numeric-id}+{login}@users.noreply.github.com`，由 `--token` 查 `/user` 自动生成）；
+> 显式传 `--email` 会覆盖它——**若传的不是 noreply 地址，脚本会打醒目告警**（真实邮箱会随 commit 历史永久公开）。
 
 仅给目录名也可（脚本会自动补 `~/.workbuddy/skills/` 前缀）：
 
@@ -106,7 +111,7 @@ python "...\publish_skill.py" --skill <skill-name> --user <your-github-user> --t
 | `--skill` | 必填 | skill 目录（绝对路径或目录名） |
 | `--user` | **必填** | 目标 GitHub 用户名（仓库 URL 前缀）。脚本**不设默认账号**，不填直接报错退出，避免误推到不打算公开的账号 |
 | `--token` | 无 | GitHub PAT（建仓库 + HTTPS 推送必需；`--ssh` 时仍需用于建仓库） |
-| `--email` | 本机 git config | git 提交邮箱。**开源建议显式传 GitHub noreply 地址**，否则真实邮箱会随 commit 历史公开 |
+| `--email` | **GitHub noreply 地址**（由 `--token` 查 `/user` 生成 `{id}+{login}@users.noreply.github.com`） | git 提交邮箱。**不要传本机真实邮箱**（会随 commit 历史永久公开）；传非 noreply 地址时脚本会告警。旧版本曾默认取本机 `git config user.email`，已废弃 |
 | `--desc` | 取 frontmatter | 仓库描述 |
 | `--private` | 关 | 创建私有仓库 |
 | `--license` | `mit` | 许可证模板（生成 LICENSE 用） |
@@ -137,6 +142,8 @@ python "...\publish_skill.py" --skill <skill-name> --user <your-github-user> --t
 ### references/
 - `sensitive_paths.json`：脱敏路径映射（**通用规则，随仓库发布**；用户名正则通配，不含任何具体人名）。
 - `sensitive_paths.local.json`：脱敏路径映射的**本机私有补充**（`.gitignore` 排除，不随仓库发布）。
+- **tag 指向远端 main**：git push 失败走 API 兜底后，本地 ref 与远端不同源，脚本会优先用**远端 main 的 head** 建 tag，并跳过本地打标签，避免 `422 Object does not exist`。
+- **`DEVLOG.md`（开发日志）—— 不随仓库发布**（用户约定，2026-10-01）：脚本会自动把它补进 `.gitignore` 并 `git rm --cached` 从索引摘掉；走 API 直推/兜底路径时同样跳过该文件，并额外下发 `sha=None` 的删除条目，把远端**历史已提交**的 `DEVLOG.md` 一并清掉。
 - `readme_template.md`：README 骨架模板（`{name}` / `{description}` / `{repo}` / `{tree}` / `{year}` / `{author}` 占位）。
 
 ### assets/
@@ -167,6 +174,13 @@ python "...\publish_skill.py" --skill <skill-name> --user <your-github-user> --t
   ③ 生成物（LICENSE / README）的版权人与署名取自 SKILL.md 的 `author` 字段，模板内不留任何硬编码人名；
   ④ 凡要写进脚本的默认值，默认是「无」而不是「我的」；⑤ 发布前必查 commit 历史邮箱（`git log --format='%ae %ce'`），
   真实邮箱必须改成 GitHub noreply 地址。这一条对所有开源交付物长期生效，不因赶时间而省略。
+- **⚠️ 提交身份两处都别踩（2026-10-02 实测泄漏过）**：① 脚本内**不得**把 `git config user.email`（本机全局＝真实邮箱）
+  当默认提交邮箱——默认必须走 `noreply_identity()`（`{id}+{login}@users.noreply.github.com`）；
+  ② 泄漏后的净化要**三处一起清**：远端 `--api-only --reset-history` 重写根提交、本地重建 commit 与 tag、并检查
+  `refs/remotes/origin/*` 是否还指向污染 commit（gc 清不掉 = 一定还有 ref 或 reflog 在引用，先 `for-each-ref` 找）。
+- **⚠️ `git()` 必须捕获 `TimeoutExpired`**（2026-10-02 实测炸过）：GFW 下 `git push origin <tag>` 超时会让整个
+  发布流程 traceback 中断（main 推成功、tag/Release 全丢）。超时要转成 `CompletedProcess(124)`，
+  交给重试与 API 兜底处理。
 - **脱敏是硬约束**：发布到公网前必须脱敏；脚本默认全量扫描文本文件替换本机路径，但仍需在 Phase 3 搜索核验 0 命中。
 - **PAT 安全**：明文 PAT 只在命令中使用，绝写入 skill 文件；用完务必提醒用户到 GitHub 吊销/轮换。PAT 会进 `.git/config` 的 remote URL，吊销后该 URL 即失效（无害），但建议改用 SSH。
 - **version 必 +1**：开源发布算 release，惯例 bump 补丁号；用 `--bump-version` 或手工 Edit。
