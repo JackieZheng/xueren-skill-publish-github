@@ -473,7 +473,40 @@ RESET_HISTORY = [False]
 
 
 # git push 失败时的兜底：走 GitHub API 直接重写 main（沙箱 / GFW 下 443 抖动时常救场）
-API_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".pytest_cache", ".venv"}
+API_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".pytest_cache", ".venv",
+                 # 2026-10-03 补：本机私有且 .gitignore 已声明的运行期产物。
+                 # ⚠️ 真实事故：playwright 的 .pwprofile 里含 Cookies / Local Storage(LevelDB)，
+                 # 曾被 root 提交整包推上开源仓库。API 推送不是 git，必须自己跳过这些目录。
+                 ".pwprofile", ".tmp_verify", ".tmp-publish-skillhub", ".idea", ".vscode"}
+
+
+def gitignore_dirs(skill_dir):
+    """读 <skill_dir>/.gitignore，返回其中声明的目录名（供 API 推送时一并跳过）。
+
+    .gitignore 是「什么不该进仓库」的唯一权威，API 推送不会自动遵守它，
+    所以这里把它解析出来，避免 .gitignore 里写了却还是被推上去的漏网目录。
+    """
+    names = set()
+    gp = os.path.join(skill_dir, ".gitignore")
+    if not os.path.isfile(gp):
+        return names
+    try:
+        with open(gp, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith(("#", "!")):
+                    continue
+                if s.endswith("/"):
+                    tail = s.rstrip("/").split("/")[-1]
+                elif "/" in s:
+                    tail = s.split("/")[-1].rstrip("/")
+                else:
+                    continue
+                if tail:
+                    names.add(tail)
+    except Exception:
+        pass
+    return names
 
 
 def noreply_identity(token, fallback_login=""):
@@ -500,8 +533,9 @@ def api_sync_main(skill_dir, user, repo, token, message, retries=3, root=False, 
     root=True 时不带 parent/base_tree，生成一个根提交（用于重写被污染的历史）。
     """
     entries, rel_paths = [], []
+    skip_dirs = set(API_SKIP_DIRS) | gitignore_dirs(skill_dir)
     for dirpath, dirnames, filenames in os.walk(skill_dir):
-        dirnames[:] = [d for d in dirnames if d not in API_SKIP_DIRS]
+        dirnames[:] = [d for d in dirnames if d not in skip_dirs]
         for fn in filenames:
             if fn in NEVER_PUBLISH:                 # 开发日志等：不进远端
                 continue
