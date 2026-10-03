@@ -7,7 +7,7 @@ slug: xueren-skill-publish-github
 displayName: 雪人老师·Skill发布到GitHub
 summary: 把本地任意 WorkBuddy skill 一键发布为 GitHub 开源仓库（不限 skill 名称与命名前缀）。
 description_en: One-click publish WorkBuddy skills to GitHub (auto-scrub + release).
-version: 1.0.19
+version: 1.0.23
 author: 雪人
 license: MIT
 allowed-tools: ""
@@ -41,6 +41,18 @@ description_zh: 把本地任意 WorkBuddy skill 一键发布为 GitHub 开源仓
 - **抗 GFW**：建仓库走可靠的 `api.github.com`，推送走 HTTPS+PAT 重试循环（`github.com:443` 在国内间歇性被墙）。
 - **自动 Release**：推送成功后自动打 `v<version>` 标签并创建/更新 GitHub Release（正文含提交摘要，幂等；`--no-release` 可关，`--prune-releases` 可只留最新版）。
 - **零外部依赖**：脱敏 / 建仓库 / 推送 / Release 全部自包含，不依赖其它 skill 即可跑通；本地备份是可选增强（本机另装 `xueren-skill-backup` 且传 `--backup` 时才触发，缺失不报错）。
+- **🔴 产品口径：开发 / 测试内容两边都不外发**（用户约定，2026-10-03 修订）：
+  **GitHub Release 与 SkillHub 一样算「产品分发」，不是二次开发源码站** —— 此前「GitHub 面向开发者、
+  开发脚本是价值因而照发」的口径已被用户否定。除 `docs/DEVLOG.md`（永不外发）外，以下三类一律不进仓库：
+  `docs/*.md`（开发 / 排障手册）、`_test_` / `_probe_` / `_demo_` / `_debug_` / `_selftest_` / `_bench_` 前缀的
+  自测调试脚本、`_test.py` / `_probe.py` / `_check.py` / `_debug.py` / `_tests.py` 后缀的同类脚本。
+  ⚠️ 例外白名单：`check_update.py` / `verify_published.py` 等**发布工具链本体**是产品的一部分，必须留在包里
+  （用户装了 skill 才能自更新 / 校验），它们的名字不含上述 dev 标记，天然保留 —— 别"顺手"把它们也排掉。
+  判定函数 `is_excluded(rel)` 与 SkillHub 侧 `publish_skillhub.py` 的 `_is_dev_test_script()` 严格对齐。
+  实现上：① git 路径 —— 写 `.gitignore` + 对已索引的排除项 `git rm --cached`；
+  ② API 直推路径 —— 跳过命中项，并用 `GET /git/trees/main?recursive=1` 找出**远端已存在**的同名文件
+  下发 `sha=None` 删除条目（base_tree 会保留未提及的旧条目，不清理就永远删不掉）。
+  `README.md` 两边都发（README 一律写成**用户向的功能介绍**，开发内容不混进去）。
 
 ## 你的工作方式
 
@@ -143,7 +155,7 @@ python "...\publish_skill.py" --skill <skill-name> --user <your-github-user> --t
 - `sensitive_paths.json`：脱敏路径映射（**通用规则，随仓库发布**；用户名正则通配，不含任何具体人名）。
 - `sensitive_paths.local.json`：脱敏路径映射的**本机私有补充**（`.gitignore` 排除，不随仓库发布）。
 - **tag 指向远端 main**：git push 失败走 API 兜底后，本地 ref 与远端不同源，脚本会优先用**远端 main 的 head** 建 tag，并跳过本地打标签，避免 `422 Object does not exist`。
-- **`DEVLOG.md`（开发日志）—— 不随仓库发布**（用户约定，2026-10-01）：脚本会自动把它补进 `.gitignore` 并 `git rm --cached` 从索引摘掉；走 API 直推/兜底路径时同样跳过该文件，并额外下发 `sha=None` 的删除条目，把远端**历史已提交**的 `DEVLOG.md` 一并清掉。
+- **`docs/DEVLOG.md`（开发日志）—— 不随仓库发布**（用户约定，2026-10-01）：脚本会自动把它补进 `.gitignore` 并 `git rm --cached` 从索引摘掉；走 API 直推/兜底路径时同样跳过该文件，并额外下发 `sha=None` 的删除条目，把远端**历史已提交**的 `docs/DEVLOG.md` 一并清掉。
 - `readme_template.md`：README 骨架模板（`{name}` / `{description}` / `{repo}` / `{tree}` / `{year}` / `{author}` 占位）。
 
 ### assets/

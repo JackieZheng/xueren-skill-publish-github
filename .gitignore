@@ -34,3 +34,19 @@ Thumbs.db
 
 # 开发日志 —— 不随仓库发布（用户约定）
 DEVLOG.md
+
+# 产品口径：开发 / 测试内容不随仓库发布（用户约定）
+devlog.md
+docs/
+_bench_*
+_debug_*
+_demo_*
+_probe_*
+_selftest_*
+_test_*
+test_*
+*_check.py
+*_debug.py
+*_probe.py
+*_test.py
+*_tests.py

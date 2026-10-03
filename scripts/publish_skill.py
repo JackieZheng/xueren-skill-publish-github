@@ -72,10 +72,74 @@ DEFAULT_EMAIL = os.environ.get("GH_EMAIL", "")
 DEFAULT_AUTHOR = "Author"
 DEFAULT_LICENSE = "MIT"
 
-# 按用户约定（2026-10-01）：**开发日志不随发布物外发**——GitHub 与 SkillHub 口径一致。
-# 做法：① 不进仓库：补进 .gitignore + `git rm --cached`（历史已提交过的也要清掉）；
-#       ② API 直推路径：跳过该文件，并显式下发 sha=None 的删除条目把远端旧文件删掉。
-NEVER_PUBLISH = {"DEVLOG.md"}
+# ---------------------------------------------------------------------------
+# 「产品口径」排除清单（2026-10-03 用户约定，两条发布渠道同一标准）
+#
+# ⚠️ **GitHub Release 与 SkillHub 都算产品分发，不是源码站 / 二次开发站**——
+# 开发 / 测试内容两边一律不外发。此前 GitHub 侧是「凡不在清单里的都发」，
+# 导致 docs/ 与 _test_*.py 一直漏进公开仓库，现与 SkillHub 侧严格对齐。
+#
+# 排除三类：
+#   ① 顶层开发日志 `DEVLOG.md`
+#   ② 开发 / 排障手册目录 `docs/`（测试怎么跑、mock 怎么造、测试观分层）
+#   ③ 自测 / 调试脚本 `_test_` / `_probe_` / `_demo_` / `_debug_` / `_selftest_` / `_bench_` 前缀
+#      + `_test.py` / `_probe.py` / `_check.py` / `_debug.py` / `_tests.py` 后缀
+#
+# 未排除说明：`check_update.py` / `verify_published.py` 等**发布工具链本体**算产品的一部分，
+# 必须留在包里（用户装了 skill 才能自更新 / 校验），只是它们名字不含上面的 dev 标记，天然保留。
+# ---------------------------------------------------------------------------
+NEVER_PUBLISH = {"devlog.md"}                      # ① 文件名（统一小写，见下方 _is_never_publish）
+NEVER_PUBLISH_DIRS = {"docs"}                      # ② 顶层目录（相对 skill 根）
+# 仓库元数据：属于「产品」，clone 下来才有人看得懂发布过滤规则，与 SkillHub 侧口径不同
+REPO_META_FILES = {".gitignore", ".gitattributes", ".gitmodules"}
+
+# ③ 开发 / 测试脚本命名（与 publish_skillhub.py 的 SKIP_* 规则逐字对齐）
+SKIP_NAME_PREFIXES = ("_test_", "test_", "_probe_", "_debug_",
+                      "_demo_", "_selftest_", "_bench_")
+SKIP_NAME_SUFFIXES = ("_test.py", "_tests.py", "_probe.py",
+                      "_check.py", "_debug.py")
+
+
+def _is_never_publish(name_lower: str) -> bool:
+    """开发日志等「绝对不外发」文件名判定（v1.0.22 修）：调用方传来的 `base` 已 lower()，
+    而集合若写成大小写敏感的 {"DEVLOG.md"}，比较恒为 False —— 根级 DEVLOG.md 会被发到 Release，
+    与「开发日志永不外发」的用户约定冲突。这里统一按小写比对，集合也统一小写。
+    """
+    return name_lower in NEVER_PUBLISH
+
+
+def is_excluded(rel):
+    """rel = 相对 skill 根目录的 posix 路径（如 `docs/update-test.md`、`scripts/_test_x.py`）。
+
+    产品口径判定：命中 ① ② ③ 任一即为「不外发」。导出供 git / API 两条路径共用。
+    """
+    base = os.path.basename(rel).lower()
+    # 仓库元数据文件（.gitignore / .gitattributes / .gitmodules）**照常发布**——
+    # 没有它们别人 clone 下来拿不到发布过滤规则。
+    # 其余点文件（.env / *.key / *token* 之类）一律视作不外发：凭据宁可漏传也绝不外泄。
+    if base in REPO_META_FILES:
+        return False
+    if _is_never_publish(base) or base.startswith("."):
+        return True
+    low = rel.lower()
+    if base.startswith(SKIP_NAME_PREFIXES) or base.endswith(SKIP_NAME_SUFFIXES):
+        return True
+    # ② 目录级：任意层级的 docs/ 目录及其内文件都不外发
+    return any(p == "docs" for p in low.split("/")[:-1])
+
+
+def collect_excluded(skill_dir):
+    """扫磁盘，返回所有命中产品口径排除项的相对 posix 路径（含 docs/ 下全部文件）。"""
+    out = []
+    for dirpath, dirnames, filenames in os.walk(skill_dir):
+        for d in list(dirnames):
+            if d.startswith(".") or d in API_SKIP_DIRS:
+                dirnames.remove(d)
+        for fn in filenames:
+            rel = os.path.relpath(os.path.join(dirpath, fn), skill_dir).replace("\\", "/")
+            if is_excluded(rel):
+                out.append(rel)
+    return sorted(out)
 BACKUP_SCRIPT = os.path.expanduser(r"~/.workbuddy/skills/xueren-skill-backup/scripts/sync_backups.py")
 
 # 脱敏默认值（references/sensitive_paths.json 优先加载；二者合并去重）。
@@ -314,11 +378,23 @@ def gen_gitignore(skill_dir):
     return os.path.join(skill_dir, ".gitignore")
 
 
-def ensure_never_publish_ignored(skill_dir):
-    """把 NEVER_PUBLISH 里的文件名补进 .gitignore。
+def exclusion_patterns():
+    """产品口径排除项 → 写进 .gitignore 的 pattern 列表（目录项带尾斜杠）。"""
+    pats = sorted(NEVER_PUBLISH)                                # DEVLOG.md
+    pats += [d + "/" for d in sorted(NEVER_PUBLISH_DIRS)]       # docs/
+    pats += [p + "*" for p in sorted(SKIP_NAME_PREFIXES)]       # _test_* / test_* / _probe_* …
+    pats += ["*" + s for s in sorted(SKIP_NAME_SUFFIXES)]       # *_test.py / *_probe.py …
+    return pats
 
-    为什么需要单独一步：`gen_gitignore` 只在 .gitignore **缺失**时才生成，
-    已存在的老仓库会被整段跳过 → 老仓库永远拿不到「DEVLOG.md 不外发」这条规则。
+
+EXCLUSION_HEADER = "\n# 产品口径：开发 / 测试内容不随仓库发布（用户约定）\n"
+
+
+def ensure_never_publish_ignored(skill_dir):
+    """把「产品口径」排除项（DEVLOG / docs/ / 开发测试脚本）补进 .gitignore。
+
+    为什么需要单独一步：`gen_gitignore` 只在 .gitignore **缺失**时才生成整段，
+    已存在的老仓库会被整段跳过 → 老仓库永远拿不到新规则（2026-10-01 DEVLOG 就踩过）。
     """
     gp = os.path.join(skill_dir, ".gitignore")
     try:
@@ -327,13 +403,15 @@ def ensure_never_publish_ignored(skill_dir):
     except Exception:
         body = ""
     lines = {ln.strip() for ln in body.splitlines()}
-    missing = [n for n in sorted(NEVER_PUBLISH) if n not in lines]
+    missing = [p for p in exclusion_patterns() if p not in lines]
     if not missing:
         return 0
     add = ""
     if body and not body.endswith("\n"):
         add += "\n"
-    add += "\n# 开发日志 —— 不随仓库发布（用户约定）\n" + "".join(n + "\n" for n in missing)
+    if EXCLUSION_HEADER not in body:
+        add += EXCLUSION_HEADER
+    add += "".join(p + "\n" for p in missing)
     with open(gp, "a", encoding="utf-8") as f:
         f.write(add)
     return len(missing)
@@ -509,6 +587,23 @@ def gitignore_dirs(skill_dir):
     return names
 
 
+def remote_excluded_paths(user, repo, token):
+    """列远端 main 里命中「产品口径排除项」的文件路径（用于下发删除条目）。
+
+    一次 `GET /git/trees/main?recursive=1` 拿全量路径（逐文件 GET contents 会打十几次 API），
+    拿不到时返回空列表 —— 宁可漏删旧文件，也不要因为探测失败把整个发布打挂。
+    """
+    code, obj = gh_api(token, "GET", f"/repos/{user}/{repo}/git/trees/main?recursive=1")
+    if code != 200 or not isinstance(obj, dict):
+        return []
+    out = []
+    for item in (obj.get("tree") or []):
+        p = item.get("path") if isinstance(item, dict) else item
+        if isinstance(p, str) and is_excluded(p):
+            out.append(p)
+    return sorted(out)
+
+
 def noreply_identity(token, fallback_login=""):
     """取 GitHub 账号的 noreply 邮箱：{id}+{login}@users.noreply.github.com。
 
@@ -537,10 +632,10 @@ def api_sync_main(skill_dir, user, repo, token, message, retries=3, root=False, 
     for dirpath, dirnames, filenames in os.walk(skill_dir):
         dirnames[:] = [d for d in dirnames if d not in skip_dirs]
         for fn in filenames:
-            if fn in NEVER_PUBLISH:                 # 开发日志等：不进远端
-                continue
             fp = os.path.join(dirpath, fn)
             rel = os.path.relpath(fp, skill_dir).replace("\\", "/")
+            if is_excluded(rel):                    # 产品口径：开发 / 测试内容不进远端
+                continue
             rel_paths.append(rel)
             try:
                 with open(fp, "rb") as f:
@@ -556,14 +651,13 @@ def api_sync_main(skill_dir, user, repo, token, message, retries=3, root=False, 
     if not entries:
         return None, "工作区无文件可提交"
 
-    # 远端已存在、但已列入「不外发」的文件 → 下发 sha=None 的删除条目，顺手清掉
-    # （base_tree 会保留未提及的旧条目，不提就永远删不掉）
+    # 远端已存在、但命中产品口径排除项的文件（DEVLOG / docs/ / 开发测试脚本）
+    # → 下发 sha=None 的删除条目顺手清掉（base_tree 会保留未提及的旧条目，不提就永远删不掉）。
+    # 逐文件下发：tree 里是文件路径而非目录，目录条目会被 GitHub 直接忽略。
     if not root:
-        for _name in sorted(NEVER_PUBLISH):
-            _code, _ = gh_api(token, "GET", f"/repos/{user}/{repo}/contents/{_name}")
-            if _code == 200:
-                entries.append({"path": _name, "mode": "100644", "type": "blob", "sha": None})
-                rel_paths.append(_name + "（删除）")
+        for _rel in remote_excluded_paths(user, repo, token):
+            entries.append({"path": _rel, "mode": "100644", "type": "blob", "sha": None})
+            rel_paths.append(_rel + "（删除）")
 
     tree_payload = {"tree": entries}
     if not root:
@@ -656,10 +750,12 @@ def git_push(skill_dir, user, repo, token, ssh, retries, args_user, args_email):
     git("config", "user.email", args_email, cwd=skill_dir)
     git("config", "http.sslVerify", "false", cwd=skill_dir)
 
-    # 不外发文件（DEVLOG.md 等）：补 .gitignore + 从索引摘掉（历史提交过的也要清）
+    # 产品口径：DEVLOG / docs/ / 开发测试脚本一律不进仓库。
+    # ① 写 .gitignore，保证后面 `git add -A` 不会再把它们捡回来；
+    # ② 对磁盘上已存在的排除项做 `rm --cached`（历史提交过的也要从索引摘干净）。
     ensure_never_publish_ignored(skill_dir)
-    for _name in sorted(NEVER_PUBLISH):
-        git("rm", "--cached", "-f", "--ignore-unmatch", _name, cwd=skill_dir)
+    for _rel in collect_excluded(skill_dir):
+        git("rm", "--cached", "-r", "-f", "--ignore-unmatch", _rel, cwd=skill_dir)
 
     git("add", "-A", cwd=skill_dir)
     # commit（无改动也 OK）
